@@ -71,20 +71,19 @@ mod binrw_tests {
 #[cfg(feature = "rkyv")]
 mod rkyv_ext {
     use crate::*;
-    use rkyv::bytecheck::{rancor::Fallible as BytecheckFallible, CheckBytes};
     use rkyv::rancor::Fallible;
     use rkyv::ser::Writer;
     use rkyv::traits::CopyOptimization;
-    use rkyv::validation::ArchiveContext;
     use rkyv::{Archive, Deserialize, Portable, Serialize};
 
     /// Declares that `FixedStr` is portable across architectures.
     unsafe impl<const N: usize> Portable for FixedStr<N> {}
 
-    /// Implements bytecheck validation for `FixedStr`.
-    unsafe impl<const N: usize, C> CheckBytes<C> for FixedStr<N>
+    /// Implements bytecheck validation for `FixedStr` (only with bytecheck feature).
+    #[cfg(feature = "bytecheck")]
+    unsafe impl<const N: usize, C> rkyv::bytecheck::CheckBytes<C> for FixedStr<N>
     where
-        C: BytecheckFallible + ArchiveContext + ?Sized,
+        C: rkyv::bytecheck::rancor::Fallible + rkyv::validation::ArchiveContext + ?Sized,
     {
         unsafe fn check_bytes(_value: *const Self, _context: &mut C) -> Result<(), C::Error> {
             // FixedStr is just a transparent wrapper around [u8; N], so it's always valid
@@ -131,37 +130,56 @@ mod rkyv_ext {
     }
 }
 
-// --- Tests for rkyv integration ---
-#[cfg(all(test, feature = "rkyv", feature = "std"))]
+// --- Tests for rkyv integration (no alloc) ---
+#[cfg(all(test, feature = "rkyv"))]
 mod rkyv_tests {
     use crate::*;
-    use rkyv::{access, access_unchecked, deserialize, to_bytes};
+    use core::mem::MaybeUninit;
+    use rkyv::rancor::Failure;
+    use rkyv::ser::allocator::SubAllocator;
+    use rkyv::ser::writer::Buffer;
+    use rkyv::util::Align;
+    use rkyv::{access_unchecked, api::low::to_bytes_in_with_alloc};
 
     #[test]
-    fn test_rkyv_roundtrip() {
+    fn test_rkyv_roundtrip_no_alloc() {
         let original = FixedStr::<10>::new("Hello");
 
-        // Serialize to bytes.
-        let bytes = to_bytes::<rkyv::rancor::Error>(&original).expect("serialization failed");
+        // Use stack-based buffers instead of heap allocation.
+        let mut output = Align([MaybeUninit::<u8>::uninit(); 256]);
+        let mut alloc = [MaybeUninit::<u8>::uninit(); 256];
 
-        // Access archived data (zero-copy). The archived form is FixedStr<10>.
-        let archived =
-            access::<FixedStr<10>, rkyv::rancor::Error>(&bytes[..]).expect("access failed");
+        // Serialize using low-level API.
+        let bytes = to_bytes_in_with_alloc::<_, _, Failure>(
+            &original,
+            Buffer::from(&mut *output),
+            SubAllocator::new(&mut alloc),
+        )
+        .expect("serialization failed");
 
-        // Deserialize back to original type.
-        let deserialized = deserialize::<FixedStr<10>, rkyv::rancor::Error>(archived)
-            .expect("deserialization failed");
-
-        assert_eq!(deserialized, original);
+        // Unsafe access without bytecheck validation.
+        let archived = unsafe { access_unchecked::<FixedStr<10>>(&*bytes) };
+        assert_eq!(archived.as_str(), original.as_str());
     }
 
     #[test]
-    fn test_rkyv_zero_copy() {
+    fn test_rkyv_zero_copy_no_alloc() {
         let original = FixedStr::<8>::new("Test123");
-        let bytes = to_bytes::<rkyv::rancor::Error>(&original).expect("serialization failed");
 
-        // Zero-copy access without deserialization.
-        let archived = unsafe { access_unchecked::<FixedStr<8>>(&bytes[..]) };
+        // Stack-based buffers.
+        let mut output = Align([MaybeUninit::<u8>::uninit(); 256]);
+        let mut alloc = [MaybeUninit::<u8>::uninit(); 256];
+
+        // Serialize to stack buffer.
+        let bytes = to_bytes_in_with_alloc::<_, _, Failure>(
+            &original,
+            Buffer::from(&mut *output),
+            SubAllocator::new(&mut alloc),
+        )
+        .expect("serialization failed");
+
+        // Zero-copy access.
+        let archived = unsafe { access_unchecked::<FixedStr<8>>(&*bytes) };
         assert_eq!(archived.as_str(), "Test123");
     }
 }
