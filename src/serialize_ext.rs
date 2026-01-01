@@ -65,6 +65,86 @@ mod binrw_tests {
 }
 
 //******************************************************************************
+//  rkyv Serialization
+//******************************************************************************
+
+#[cfg(feature = "rkyv")]
+mod rkyv_ext {
+    use crate::*;
+    use rkyv::rancor::Fallible;
+    use rkyv::ser::Writer;
+    use rkyv::{Archive, Deserialize, Serialize};
+
+    /// Implements rkyv archiving for `FixedStr`.
+    /// The archived form is simply the byte array [u8; N].
+    impl<const N: usize> Archive for FixedStr<N> {
+        type Archived = [u8; N];
+        type Resolver = ();
+
+        #[inline]
+        fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+            out.write(self.data);
+        }
+    }
+
+    /// Implements rkyv serialization for `FixedStr`.
+    impl<const N: usize, S> Serialize<S> for FixedStr<N>
+    where
+        S: Fallible + Writer + ?Sized,
+    {
+        fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+            serializer.write(&self.data)?;
+            Ok(())
+        }
+    }
+
+    /// Implements rkyv deserialization for `FixedStr`.
+    impl<const N: usize, D> Deserialize<FixedStr<N>, D> for [u8; N]
+    where
+        D: Fallible + ?Sized,
+    {
+        fn deserialize(&self, _deserializer: &mut D) -> Result<FixedStr<N>, D::Error> {
+            Ok(FixedStr { data: *self })
+        }
+    }
+}
+
+// --- Tests for rkyv integration ---
+#[cfg(all(test, feature = "rkyv", feature = "std"))]
+mod rkyv_tests {
+    use crate::*;
+    use rkyv::{access, access_unchecked, deserialize, to_bytes};
+
+    #[test]
+    fn test_rkyv_roundtrip() {
+        let original = FixedStr::<10>::new("Hello");
+
+        // Serialize to bytes.
+        let bytes = to_bytes::<rkyv::rancor::Error>(&original).expect("serialization failed");
+
+        // Access archived data (zero-copy). The archived form is [u8; 10].
+        let archived = access::<[u8; 10], rkyv::rancor::Error>(&bytes[..]).expect("access failed");
+
+        // Deserialize back to original type.
+        let deserialized = deserialize::<FixedStr<10>, rkyv::rancor::Error>(archived)
+            .expect("deserialization failed");
+
+        assert_eq!(deserialized, original);
+    }
+
+    #[test]
+    fn test_rkyv_zero_copy() {
+        let original = FixedStr::<8>::new("Test123");
+        let bytes = to_bytes::<rkyv::rancor::Error>(&original).expect("serialization failed");
+
+        // Zero-copy access without deserialization.
+        let archived = unsafe { access_unchecked::<[u8; 8]>(&bytes[..]) };
+        let reconstructed = FixedStr::<8>::from_bytes(*archived);
+        assert_eq!(reconstructed.as_str(), "Test123");
+    }
+}
+
+//******************************************************************************
 //  Serde Serialization
 //******************************************************************************
 
