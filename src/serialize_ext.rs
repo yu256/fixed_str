@@ -71,19 +71,42 @@ mod binrw_tests {
 #[cfg(feature = "rkyv")]
 mod rkyv_ext {
     use crate::*;
+    use rkyv::bytecheck::{rancor::Fallible as BytecheckFallible, CheckBytes};
     use rkyv::rancor::Fallible;
     use rkyv::ser::Writer;
-    use rkyv::{Archive, Deserialize, Serialize};
+    use rkyv::traits::CopyOptimization;
+    use rkyv::validation::ArchiveContext;
+    use rkyv::{Archive, Deserialize, Portable, Serialize};
+
+    /// Declares that `FixedStr` is portable across architectures.
+    unsafe impl<const N: usize> Portable for FixedStr<N> {}
+
+    /// Implements bytecheck validation for `FixedStr`.
+    unsafe impl<const N: usize, C> CheckBytes<C> for FixedStr<N>
+    where
+        C: BytecheckFallible + ArchiveContext + ?Sized,
+    {
+        unsafe fn check_bytes(_value: *const Self, _context: &mut C) -> Result<(), C::Error> {
+            // FixedStr is just a transparent wrapper around [u8; N], so it's always valid
+            Ok(())
+        }
+    }
 
     /// Implements rkyv archiving for `FixedStr`.
-    /// The archived form is simply the byte array [u8; N].
+    /// The archived form is `FixedStr` itself.
     impl<const N: usize> Archive for FixedStr<N> {
-        type Archived = [u8; N];
+        type Archived = Self;
         type Resolver = ();
+
+        /// Enables copy optimization for efficient serialization.
+        const COPY_OPTIMIZATION: CopyOptimization<Self> = unsafe { CopyOptimization::enable() };
 
         #[inline]
         fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-            out.write(self.data);
+            // SAFETY: FixedStr is Copy and repr(transparent) around [u8; N]
+            unsafe {
+                core::ptr::write(out.ptr() as *mut Self, *self);
+            }
         }
     }
 
@@ -93,18 +116,17 @@ mod rkyv_ext {
         S: Fallible + Writer + ?Sized,
     {
         fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-            serializer.write(&self.data)?;
-            Ok(())
+            serializer.write(&self.data)
         }
     }
 
     /// Implements rkyv deserialization for `FixedStr`.
-    impl<const N: usize, D> Deserialize<FixedStr<N>, D> for [u8; N]
+    impl<const N: usize, D> Deserialize<FixedStr<N>, D> for FixedStr<N>
     where
         D: Fallible + ?Sized,
     {
         fn deserialize(&self, _deserializer: &mut D) -> Result<FixedStr<N>, D::Error> {
-            Ok(FixedStr { data: *self })
+            Ok(*self)
         }
     }
 }
@@ -122,8 +144,9 @@ mod rkyv_tests {
         // Serialize to bytes.
         let bytes = to_bytes::<rkyv::rancor::Error>(&original).expect("serialization failed");
 
-        // Access archived data (zero-copy). The archived form is [u8; 10].
-        let archived = access::<[u8; 10], rkyv::rancor::Error>(&bytes[..]).expect("access failed");
+        // Access archived data (zero-copy). The archived form is FixedStr<10>.
+        let archived =
+            access::<FixedStr<10>, rkyv::rancor::Error>(&bytes[..]).expect("access failed");
 
         // Deserialize back to original type.
         let deserialized = deserialize::<FixedStr<10>, rkyv::rancor::Error>(archived)
@@ -138,9 +161,8 @@ mod rkyv_tests {
         let bytes = to_bytes::<rkyv::rancor::Error>(&original).expect("serialization failed");
 
         // Zero-copy access without deserialization.
-        let archived = unsafe { access_unchecked::<[u8; 8]>(&bytes[..]) };
-        let reconstructed = FixedStr::<8>::from_bytes(*archived);
-        assert_eq!(reconstructed.as_str(), "Test123");
+        let archived = unsafe { access_unchecked::<FixedStr<8>>(&bytes[..]) };
+        assert_eq!(archived.as_str(), "Test123");
     }
 }
 
